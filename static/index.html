@@ -1,0 +1,644 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cybersecurity Dashboard - Distributed Limiter</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@400;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0f172a; 
+            --panel-bg: rgba(30, 41, 59, 0.7);
+            --border-color: rgba(56, 189, 248, 0.2);
+            --text-color: #e2e8f0;
+            
+            --server-color: #38bdf8; 
+            --redis-color: #f59e0b; 
+            --attacker-color: #ef4444; 
+            --success-color: #10b981; 
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0; padding: 0;
+            background-color: var(--bg-color);
+            background-image: radial-gradient(circle at 50% 50%, #1e293b 0%, #0f172a 100%);
+            color: var(--text-color); font-family: 'Inter', sans-serif;
+            overflow: hidden; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; height: 100vh;
+        }
+
+        #arena-wrapper {
+            position: relative; width: 1200px; height: 700px;
+            transform-origin: center center;
+        }
+
+        #bg-svg {
+            position: absolute; top: 0; left: 0;
+            width: 100%; height: 100%; z-index: 1; pointer-events: none;
+        }
+
+        .path-line { fill: none; stroke: var(--border-color); stroke-width: 2; opacity: 0.3; }
+
+        .node {
+            position: absolute; transform: translate(-50%, -50%);
+            z-index: 10; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; text-align: center;
+        }
+
+        .node-icon { width: 80px; height: 80px; margin-bottom: 15px; filter: drop-shadow(0 0 15px var(--server-color)); transition: all 0.2s; }
+        #redis-node .node-icon { width: 100px; height: 100px; filter: drop-shadow(0 0 20px var(--redis-color)); }
+
+        .node h3 { margin: 0; font-family: 'JetBrains Mono', monospace; font-size: 1.2rem; color: #fff; text-shadow: 0 0 10px rgba(255,255,255,0.5); letter-spacing: 2px; text-transform: uppercase; }
+
+        .counter { font-family: 'JetBrains Mono', monospace; font-size: 2.5rem; font-weight: 800; margin-top: 5px; color: var(--server-color); text-shadow: 0 0 15px var(--server-color); }
+        #redis-counter { font-size: 4rem; color: var(--redis-color); text-shadow: 0 0 20px var(--redis-color); }
+
+        #attacker-node { left: 150px; top: 350px; }
+        #server-app1 { left: 550px; top: 200px; }
+        #server-app2 { left: 550px; top: 500px; }
+        #redis-node { left: 950px; top: 350px; }
+        
+        #command-center {
+            position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%);
+            width: 90%; max-width: 1000px;
+            background: var(--panel-bg); backdrop-filter: blur(16px);
+            border: 1px solid rgba(255,255,255,0.1); border-radius: 20px;
+            padding: 20px 40px; display: flex; justify-content: space-between;
+            align-items: center; z-index: 100; box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+        }
+
+        .cmd-section { display: flex; align-items: center; gap: 20px; }
+        .cmd-label { font-family: 'JetBrains Mono', monospace; text-transform: uppercase; font-size: 0.9rem; color: #94a3b8; font-weight: 700; }
+
+        .switch { position: relative; display: inline-block; width: 60px; height: 34px; }
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #334155; transition: .4s; border-radius: 34px; box-shadow: inset 0 2px 4px rgba(0,0,0,0.5); }
+        .slider:before { position: absolute; content: ""; height: 26px; width: 26px; left: 4px; bottom: 4px; background-color: white; transition: .4s; border-radius: 50%; box-shadow: 0 2px 5px rgba(0,0,0,0.2); }
+        input:checked + .slider { background-color: var(--success-color); box-shadow: 0 0 15px rgba(16, 185, 129, 0.5); }
+        input:checked + .slider:before { transform: translateX(26px); }
+
+        .rps-input-group { display: flex; align-items: center; background: rgba(0,0,0,0.3); border-radius: 8px; padding: 5px 15px; border: 1px solid rgba(255,255,255,0.1); }
+        .rps-input-group input { background: transparent; border: none; color: white; font-family: 'JetBrains Mono', monospace; font-size: 1.2rem; width: 60px; text-align: right; outline: none; font-weight: 700; }
+        .rps-input-group span { margin-left: 10px; color: #94a3b8; font-family: 'JetBrains Mono', monospace; }
+
+        .btn { padding: 12px 30px; border-radius: 10px; border: none; font-family: 'Inter', sans-serif; font-weight: 800; font-size: 1rem; letter-spacing: 1px; cursor: pointer; transition: all 0.2s; text-transform: uppercase; }
+        .btn-start { background: rgba(16, 185, 129, 0.1); color: var(--success-color); border: 1px solid var(--success-color); box-shadow: 0 0 15px rgba(16, 185, 129, 0.3); }
+        .btn-start:hover { background: var(--success-color); color: #000; box-shadow: 0 0 25px var(--success-color); }
+        
+        .btn-stop { background: rgba(239, 68, 68, 0.1); color: var(--attacker-color); border: 1px solid var(--attacker-color); box-shadow: 0 0 15px rgba(239, 68, 68, 0.3); }
+        .btn-stop:hover { background: var(--attacker-color); color: #fff; box-shadow: 0 0 25px var(--attacker-color); }
+
+        .attacker-origin {
+            position: absolute; left: 50px; transform: translateY(-50%);
+            font-family: 'JetBrains Mono', monospace; font-size: 0.8rem;
+            color: var(--attacker-color); background: rgba(239, 68, 68, 0.1);
+            padding: 5px 10px; border-radius: 6px; border: 1px solid rgba(239, 68, 68, 0.3); z-index: 5;
+        }
+
+        .ip-blocked-msg {
+            position: absolute; left: 105%; top: 50%; transform: translateY(-50%);
+            color: var(--attacker-color); text-shadow: 0 0 10px var(--attacker-color);
+            text-align: center; font-family: 'JetBrains Mono', monospace;
+            font-size: 0.75rem; font-weight: bold; white-space: nowrap;
+            display: flex; flex-direction: column; align-items: center; gap: 5px;
+            animation: fade-in 0.3s forwards; background: rgba(15, 23, 42, 0.95);
+            padding: 10px 15px; border: 1px solid var(--attacker-color); border-radius: 8px; z-index: 40;
+        }
+
+        @keyframes shake {
+            0% { transform: translate(-50%, -50%) rotate(0deg) scale(1); }
+            25% { transform: translate(-52%, -48%) rotate(-3deg) scale(1.05); }
+            50% { transform: translate(-48%, -52%) rotate(3deg) scale(1.05); }
+            75% { transform: translate(-52%, -52%) rotate(-3deg) scale(1.05); }
+            100% { transform: translate(-50%, -50%) rotate(0deg) scale(1); }
+        }
+        .shake .node-icon { animation: shake 0.3s cubic-bezier(.36,.07,.19,.97) infinite; filter: drop-shadow(0 0 30px var(--attacker-color)); }
+
+        .packet {
+            position: absolute; width: 14px; height: 14px; background: var(--success-color); border-radius: 50%; z-index: 20;
+            box-shadow: 0 0 15px var(--success-color), 0 0 30px var(--success-color); offset-path: var(--motion-path);
+            animation: packet-move 0.4s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+        }
+        .packet.denied { background: var(--attacker-color); box-shadow: 0 0 15px var(--attacker-color), 0 0 30px var(--attacker-color); }
+        .packet.db { background: var(--redis-color); box-shadow: 0 0 15px var(--redis-color), 0 0 30px var(--redis-color); animation-duration: 0.2s; }
+
+        @keyframes packet-move {
+            0% { offset-distance: 0%; opacity: 0; transform: scale(0.5); }
+            10% { opacity: 1; transform: scale(1); }
+            90% { opacity: 1; transform: scale(1); }
+            100% { offset-distance: 100%; opacity: 0; transform: scale(0.5); }
+        }
+
+        .node-overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 80px;
+            pointer-events: none; z-index: 30; display: flex; align-items: center; justify-content: center;
+        }
+
+        .crash-x {
+            color: var(--attacker-color); font-size: 8rem; font-weight: 800; font-family: 'JetBrains Mono', monospace;
+            text-shadow: 0 0 50px var(--attacker-color); animation: pulse-crash 0.5s infinite alternate;
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+        }
+
+        @keyframes fade-in { from { opacity: 0; transform: translateY(-50%) translateX(-10px); } to { opacity: 1; transform: translateY(-50%) translateX(0); } }
+        @keyframes pulse-crash { from { text-shadow: 0 0 30px var(--attacker-color); transform: translate(-50%, -50%) scale(1); } to { text-shadow: 0 0 80px var(--attacker-color); transform: translate(-50%, -50%) scale(1.1); } }
+
+        .path-x-mark {
+            position: absolute; color: var(--attacker-color); font-size: 4rem; font-weight: 800; font-family: 'JetBrains Mono', monospace;
+            text-shadow: 0 0 30px var(--attacker-color); transform: translate(-50%, -50%); z-index: 40;
+            animation: pop-in 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+        }
+        @keyframes pop-in { from { opacity: 0; transform: translate(-50%, -50%) scale(0.5); } to { opacity: 1; transform: translate(-50%, -50%) scale(1); } }
+
+        .spark-svg { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 25; opacity: 0; }
+        .spark-svg.active { animation: flash-spark 0.2s ease-out; }
+
+        @keyframes flash-spark { 0% { opacity: 1; filter: drop-shadow(0 0 10px white) drop-shadow(0 0 30px var(--server-color)); } 100% { opacity: 0; filter: drop-shadow(0 0 0px white); } }
+        
+        .particle-stream {
+            fill: none;
+            stroke: var(--attacker-color);
+            stroke-width: 12;
+            opacity: 0.8;
+            filter: drop-shadow(0 0 20px var(--attacker-color));
+            stroke-dasharray: 50 150;
+            animation: stream-flow 0.5s linear infinite;
+        }
+        
+        @keyframes stream-flow {
+            from { stroke-dashoffset: 200; }
+            to { stroke-dashoffset: 0; }
+        }
+        
+        /* System Console */
+        #system-console {
+            position: fixed; right: 20px; top: 40px; bottom: 140px; width: 350px;
+            background-color: rgba(0, 0, 0, 0.85); border: 1px solid rgba(56, 189, 248, 0.3);
+            border-radius: 8px; padding: 15px; font-family: 'JetBrains Mono', monospace;
+            font-size: 0.75rem; color: #10b981; overflow-y: auto; z-index: 100;
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.5); 
+            scrollbar-width: thin; scrollbar-color: var(--server-color) rgba(0,0,0,0.5);
+            backdrop-filter: blur(5px);
+        }
+        
+        #system-console::-webkit-scrollbar { width: 6px; }
+        #system-console::-webkit-scrollbar-thumb { background: var(--server-color); border-radius: 4px; }
+
+        #console-header {
+            color: var(--server-color); font-weight: bold; font-size: 0.85rem; 
+            margin-bottom: 10px; border-bottom: 1px solid rgba(56, 189, 248, 0.3); 
+            padding-bottom: 8px; text-transform: uppercase;
+            position: sticky; top: -15px; background-color: rgba(0, 0, 0, 0.95);
+            margin-top: -15px; padding-top: 15px; z-index: 10;
+        }
+
+        .log-entry { 
+            word-break: break-word; animation: fade-in 0.2s forwards; 
+            border-bottom: 1px solid rgba(16, 185, 129, 0.1); 
+            padding: 5px 0; margin-bottom: 2px;
+        }
+        .log-time { color: #64748b; }
+        .log-node { color: var(--server-color); font-weight: bold; }
+        .log-action { color: #f8fafc; }
+        .log-result.ok { color: var(--success-color); }
+        .log-result.block { color: var(--redis-color); }
+        .log-result.crash { color: var(--attacker-color); font-weight: bold; text-shadow: 0 0 5px var(--attacker-color); }
+    </style>
+</head>
+<body>
+
+    <div id="system-console">
+        <div id="console-header">System Event Log</div>
+        <div id="console-logs"></div>
+    </div>
+
+    <div id="arena-wrapper">
+        <svg id="bg-svg" viewBox="0 0 1200 700"></svg>
+        <svg id="spark-layer" class="spark-svg" viewBox="0 0 1200 700"></svg>
+
+        <div id="attacker-node" class="node">
+            <svg class="node-icon" viewBox="0 0 24 24" fill="none" stroke="var(--attacker-color)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"></circle>
+                <path d="M8 14h8"></path>
+                <path d="M9 9h.01"></path>
+                <path d="M15 9h.01"></path>
+            </svg>
+            <h3>Attacker</h3>
+        </div>
+
+        <div id="server-app1" class="node">
+            <div class="node-overlay" id="overlay-app1"></div>
+            <svg class="node-icon" viewBox="0 0 24 24" fill="none" stroke="var(--server-color)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+            </svg>
+            <h3>System 1</h3>
+            <div id="count-app1" class="counter">0</div>
+        </div>
+
+        <div id="server-app2" class="node">
+            <div class="node-overlay" id="overlay-app2"></div>
+            <svg class="node-icon" viewBox="0 0 24 24" fill="none" stroke="var(--server-color)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+            </svg>
+            <h3>System 2</h3>
+            <div id="count-app2" class="counter">0</div>
+        </div>
+
+        <div id="redis-node" class="node">
+            <svg class="node-icon" viewBox="0 0 24 24" fill="none" stroke="var(--redis-color)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.9 0 2.5 2.5 0 0 1-4.96-.54 2.5 2.5 0 0 1-1.14-4.46A2.5 2.5 0 0 1 2 10.5 2.5 2.5 0 0 1 4.5 8c0-.28.05-.55.14-.8A2.5 2.5 0 0 1 9.5 2z"></path>
+                <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.9 0 2.5 2.5 0 0 0 4.96-.54 2.5 2.5 0 0 0 1.14-4.46A2.5 2.5 0 0 0 22 10.5a2.5 2.5 0 0 0-2.5-2.5c0-.28-.05-.55-.14-.8A2.5 2.5 0 0 0 14.5 2z"></path>
+            </svg>
+            <h3>Redis Brain</h3>
+            <div id="redis-counter">0</div>
+        </div>
+    </div>
+
+    <div id="command-center">
+        <div class="cmd-section">
+            <div class="cmd-label">Global Limiter Shield</div>
+            <label class="switch">
+                <input type="checkbox" id="limiter-toggle" checked>
+                <span class="slider"></span>
+            </label>
+        </div>
+        
+        <div class="cmd-section" style="flex-direction: column; align-items: center; gap: 5px;">
+            <div style="color: var(--attacker-color); font-family: 'JetBrains Mono'; font-size: 0.75rem; letter-spacing: 1px; font-weight: 700;">WARNING: >5000 RPS MAY HARM LOCAL HARDWARE</div>
+            <div class="rps-input-group">
+                <input type="number" id="rps-input" value="15" min="1" max="5000">
+                <span>RPS</span>
+            </div>
+        </div>
+
+        <div class="cmd-section">
+            <button id="start-btn" class="btn btn-start">Start Attack</button>
+        </div>
+    </div>
+
+    <script>
+        function resizeArena() {
+            const wrapper = document.getElementById('arena-wrapper');
+            const scaleX = (window.innerWidth - 380) / 1200; 
+            const scaleY = (window.innerHeight - 150) / 700;
+            const scale = Math.min(scaleX, scaleY, 1.2); 
+            wrapper.style.transform = `scale(${scale}) translateX(-150px)`;
+        }
+        window.addEventListener('resize', resizeArena);
+        resizeArena();
+
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
+        let ws;
+        
+        const state = {
+            app1Count: 0, app2Count: 0,
+            attackers: {}, trafficInterval: null,
+            crashing: { app1: false, app2: false }
+        };
+
+        const bgSvg = document.getElementById('bg-svg');
+        const sparkSvg = document.getElementById('spark-layer');
+        const arena = document.getElementById('arena-wrapper');
+        const consoleEl = document.getElementById('system-console');
+        const logsContainer = document.getElementById('console-logs');
+        
+        const paths = {
+            'attacker-app1': "path('M 150 350 C 350 350, 350 200, 550 200')",
+            'attacker-app2': "path('M 150 350 C 350 350, 350 500, 550 500')",
+            'app1-redis': "path('M 550 200 C 750 200, 750 350, 950 350')",
+            'app2-redis': "path('M 550 500 C 750 500, 750 350, 950 350')"
+        };
+
+        function addLog(node, action, result, resultClass) {
+            const now = new Date();
+            const timeStr = now.toTimeString().split(' ')[0] + '.' + now.getMilliseconds().toString().padStart(3, '0');
+            
+            const logEntry = document.createElement('div');
+            logEntry.className = 'log-entry';
+            logEntry.innerHTML = `<span class="log-time">[${timeStr}]</span> <span class="log-node">[${node.toUpperCase()}]</span> <span class="log-action">[${action}]</span> -> <span class="log-result ${resultClass}">[${result}]</span>`;
+            
+            logsContainer.appendChild(logEntry);
+            
+            if (logsContainer.children.length > 50) {
+                logsContainer.removeChild(logsContainer.firstChild);
+            }
+            consoleEl.scrollTop = consoleEl.scrollHeight;
+        }
+
+        function addLogRaw(resultClass, message) {
+            const now = new Date();
+            const timeStr = now.toTimeString().split(' ')[0] + '.' + now.getMilliseconds().toString().padStart(3, '0');
+            
+            const logEntry = document.createElement('div');
+            logEntry.className = 'log-entry';
+            if (resultClass === 'crash') {
+                logEntry.style.backgroundColor = 'rgba(239, 68, 68, 0.2)';
+                logEntry.style.border = '1px solid var(--attacker-color)';
+                logEntry.innerHTML = `<span class="log-time">[${timeStr}]</span> <span class="log-result crash" style="font-weight:900;">${message}</span>`;
+            } else {
+                logEntry.innerHTML = `<span class="log-time">[${timeStr}]</span> <span class="log-result ${resultClass}">${message}</span>`;
+            }
+            
+            logsContainer.appendChild(logEntry);
+            
+            if (logsContainer.children.length > 50) {
+                logsContainer.removeChild(logsContainer.firstChild);
+            }
+            consoleEl.scrollTop = consoleEl.scrollHeight;
+        }
+
+        function drawStaticLines() {
+            const rawPaths = {
+                'attacker-app1': 'M 150 350 C 350 350, 350 200, 550 200',
+                'attacker-app2': 'M 150 350 C 350 350, 350 500, 550 500',
+                'app1-redis': 'M 550 200 C 750 200, 750 350, 950 350',
+                'app2-redis': 'M 550 500 C 750 500, 750 350, 950 350'
+            };
+            for(let id in rawPaths) {
+                const p = document.createElementNS("http://www.w3.org/2000/svg", "path");
+                p.setAttribute('d', rawPaths[id]); p.setAttribute('class', 'path-line');
+                bgSvg.appendChild(p);
+                
+                const sp = document.createElementNS("http://www.w3.org/2000/svg", "path");
+                sp.setAttribute('d', rawPaths[id]); sp.setAttribute('class', 'path-line');
+                sp.style.stroke = 'white'; sp.style.strokeWidth = '6'; sp.id = `spark-${id}`;
+                sparkSvg.appendChild(sp);
+            }
+        }
+        drawStaticLines();
+
+        function getAttackerId(ip) { return `attacker-${ip.replace(/[^a-zA-Z0-9]/g, '')}`; }
+        function getAttackerPathId(ip, instance) { return `path-${ip}-${instance}`.replace(/[^a-zA-Z0-9]/g, ''); }
+
+        const startBtn = document.getElementById('start-btn');
+        const stopBtn = document.getElementById('stop-btn');
+        
+        startBtn.addEventListener('click', () => {
+            let rps = parseInt(document.getElementById('rps-input').value) || 0;
+            if (rps > 5000) rps = 5000;
+            
+            if (rps > 0) {
+                // Reset visual counters instantly
+                state.app1Count = 0;
+                state.app2Count = 0;
+                document.getElementById('count-app1').innerText = '0';
+                document.getElementById('count-app2').innerText = '0';
+                document.getElementById('redis-counter').innerText = '0';
+                document.querySelectorAll('.crash-x').forEach(el => el.remove());
+                document.querySelectorAll('.node').forEach(n => n.classList.remove('shake'));
+                state.crashing = { app1: false, app2: false };
+
+                startBtn.disabled = true;
+                startBtn.style.opacity = '0.5';
+                startBtn.innerText = 'Attacking...';
+                
+                if(ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: "reset" }));
+                    setTimeout(() => {
+                        ws.send(JSON.stringify({ type: "attack", enabled: true, rps: rps }));
+                        
+                        // Automatically reset button after 1.5 seconds
+                        setTimeout(() => {
+                            ws.send(JSON.stringify({ type: "attack", enabled: false, rps: 0 }));
+                            startBtn.disabled = false;
+                            startBtn.style.opacity = '1';
+                            startBtn.innerText = 'Start Attack';
+                            addLog('SYSTEM', 'CMD: ATTACK', 'COMPLETED', 'ok');
+                        }, 1500);
+                    }, 100); // tiny delay to let reset propagate
+                }
+                addLog('SYSTEM', 'CMD: ATTACK', `START (${rps} Req)`, 'block');
+            }
+        });
+
+        document.getElementById('limiter-toggle').addEventListener('change', (e) => {
+            if(ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: "toggle", enabled: e.target.checked }));
+            }
+            document.querySelectorAll('.ip-blocked-msg').forEach(el => el.remove());
+        });
+
+        function initWebSocket() {
+            ws = new WebSocket(wsUrl);
+            ws.onopen = () => addLog('SYSTEM', 'WS CONNECTION', 'ESTABLISHED', 'ok');
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                if (data.type === "control") {
+                    document.getElementById('limiter-toggle').checked = data.control.limiter_enabled;
+                    document.querySelectorAll('.node').forEach(n => n.classList.remove('shake'));
+                    document.querySelectorAll('.crash-x').forEach(el => el.remove());
+                    state.crashing = { app1: false, app2: false };
+                    
+                    addLog('SYSTEM', 'CMD: LIMITER', data.control.limiter_enabled ? 'ENABLED' : 'DISABLED', data.control.limiter_enabled ? 'ok' : 'crash');
+                } else if (data.type === "traffic") {
+                    handleTraffic(data.traffic);
+                } else if (data.type === "burst") {
+                    handleBurst(data.burst);
+                }
+            };
+            ws.onclose = () => {
+                addLog('SYSTEM', 'WS CONNECTION', 'LOST', 'crash');
+                setTimeout(initWebSocket, 2000);
+            };
+        }
+
+        let packetCount = 0;
+        function handleTraffic(data) {
+            packetCount++;
+            
+            if (!state.attackers[data.ip]) {
+                state.attackers[data.ip] = true;
+            }
+            
+            // To prevent the browser from freezing at 2000 RPS, we throttle DOM updates 
+            // and animations if traffic is very high. The counters still stay fully accurate!
+            const currentRps = parseInt(document.getElementById('rps-input').value) || 0;
+            const throttleRate = currentRps > 200 ? Math.ceil(currentRps / 50) : 1; 
+
+            if (packetCount % throttleRate !== 0) {
+                 // Fast-Path: Update counters quietly
+                 if (data.instance === 'app1') {
+                     state.app1Count++; document.getElementById('count-app1').innerText = state.app1Count;
+                 } else {
+                     state.app2Count++; document.getElementById('count-app2').innerText = state.app2Count;
+                 }
+                 
+                 const isLimiterEnabled = document.getElementById('limiter-toggle').checked;
+                 if (data.status === 429 && isLimiterEnabled) {
+                     handleOverloadVisuals(data.instance, false, data.ip);
+                     document.getElementById('redis-counter').innerText = data.count;
+                 } else if (data.status === 503 && !isLimiterEnabled) {
+                     handleOverloadVisuals(data.instance, true, data.ip);
+                 } else if (data.status === 200 && isLimiterEnabled) {
+                     document.getElementById('redis-counter').innerText = data.count;
+                 }
+                 return; // Skip animation and log insertion to save CPU
+            }
+
+            let logNodeName = data.instance === 'app1' ? 'System 1' : 'System 2';
+            
+            if (data.status === 429) {
+                addLogRaw('block', `ATTACK DEFLECTED: 429 Too Many Requests blocked by ${logNodeName}`);
+            } else if (data.status === 503) {
+                addLogRaw('crash', `CRITICAL FAILURE: ${logNodeName} is OVERLOADED (503 Service Unavailable)`);
+            } else {
+                addLog(logNodeName.toUpperCase(), `REQ: ${data.ip}`, '200 OK', 'ok');
+            }
+
+            animatePacket(data);
+        }
+
+        function handleBurst(data) {
+            let logNodeName = data.node === 'app1' ? 'SYSTEM 1' : 'SYSTEM 2';
+            let formattedCount = data.count.toLocaleString();
+            
+            // Highlighted Log Entry
+            if (data.status === 503) {
+                addLogRaw('crash', `CRITICAL FAILURE: ${logNodeName} is OVERLOADED (503 Service Unavailable) - BURST: ${formattedCount}`);
+            } else {
+                addLogRaw('block', `ATTACK DEFLECTED: 429 Too Many Requests blocked by ${logNodeName} - BURST: ${formattedCount}`);
+            }
+            
+            if (logsContainer.children.length > 50) {
+                logsContainer.removeChild(logsContainer.firstChild);
+            }
+            consoleEl.scrollTop = consoleEl.scrollHeight;
+
+            // Odometer Counter Animation
+            let startCount = data.node === 'app1' ? state.app1Count : state.app2Count;
+            let targetCount = startCount + data.count;
+            let current = startCount;
+            let steps = 15;
+            let stepValue = Math.ceil(data.count / steps);
+            
+            let odometerInterval = setInterval(() => {
+                current += stepValue;
+                if (current >= targetCount) {
+                    current = targetCount;
+                    clearInterval(odometerInterval);
+                }
+                
+                if (data.node === 'app1') {
+                    state.app1Count = current;
+                    document.getElementById('count-app1').innerText = current;
+                } else {
+                    state.app2Count = current;
+                    document.getElementById('count-app2').innerText = current;
+                }
+            }, 50);
+
+            // Particle Stream Effect
+            const endY = data.node === 'app1' ? 200 : 500;
+            const d = `M 150 350 C 350 350, 350 ${endY}, 550 ${endY}`;
+            
+            const p = document.createElementNS("http://www.w3.org/2000/svg", "path");
+            p.setAttribute('d', d);
+            p.setAttribute('class', 'particle-stream');
+            bgSvg.appendChild(p);
+            
+            setTimeout(() => {
+                p.remove();
+            }, 800);
+
+            // Visual Shake / Overload
+            const isLimiterEnabled = document.getElementById('limiter-toggle').checked;
+            handleOverloadVisuals(data.node, data.status === 503, "BURST");
+            
+            if (isLimiterEnabled) {
+                // Approximate redis update since we skipped the individual packets
+                document.getElementById('redis-counter').innerText = targetCount + (data.node === 'app1' ? state.app2Count : state.app1Count);
+            }
+        }
+
+        function createCurve(ip, instance, startY, endY) {
+            const pathId = getAttackerPathId(ip, instance);
+            const d = `M 150 ${startY} C 300 ${startY}, 300 ${endY}, 450 ${endY}`;
+            paths[pathId] = `path('${d}')`;
+            
+            const p = document.createElementNS("http://www.w3.org/2000/svg", "path");
+            p.setAttribute('d', d); p.setAttribute('class', 'path-line');
+            bgSvg.appendChild(p);
+            
+            const sp = document.createElementNS("http://www.w3.org/2000/svg", "path");
+            sp.setAttribute('d', d); sp.setAttribute('class', 'path-line');
+            sp.style.stroke = 'white'; sp.style.strokeWidth = '6'; sp.id = `spark-${pathId}`;
+            sparkSvg.appendChild(sp);
+        }
+
+        function handleOverloadVisuals(instance, isCrash, ip) {
+            const targetServer = document.getElementById(`server-${instance}`);
+            const isLimiterEnabled = document.getElementById('limiter-toggle').checked;
+            
+            if (isCrash && !isLimiterEnabled) {
+                targetServer.classList.add('shake');
+                sparkSvg.classList.remove('active');
+                void sparkSvg.offsetWidth;
+                sparkSvg.classList.add('active');
+
+                if (!state.crashing[instance]) {
+                    state.crashing[instance] = true;
+                    const overlay = document.getElementById(`overlay-${instance}`);
+                    const x = document.createElement('div');
+                    x.className = 'crash-x'; x.innerText = '✖';
+                    overlay.appendChild(x);
+                }
+            } else if (!isCrash && isLimiterEnabled) {
+                targetServer.classList.add('shake');
+                setTimeout(() => targetServer.classList.remove('shake'), 200);
+                
+                const xMark = document.createElement('div');
+                xMark.className = 'path-x-mark';
+                xMark.innerText = '✖';
+                xMark.style.left = '350px';
+                xMark.style.top = instance === 'app1' ? '275px' : '425px';
+                arena.appendChild(xMark);
+                setTimeout(() => xMark.remove(), 600);
+            }
+        }
+
+        function animatePacket(data) {
+            const packet = document.createElement('div');
+            packet.className = 'packet';
+            if (data.status === 429 || data.status === 503) packet.classList.add('denied');
+
+            const pathId = `attacker-${data.instance}`;
+            packet.style.setProperty('--motion-path', paths[pathId]);
+            arena.appendChild(packet);
+
+            setTimeout(() => {
+                packet.remove();
+
+                if (data.instance === 'app1') {
+                    state.app1Count++; document.getElementById('count-app1').innerText = state.app1Count;
+                } else {
+                    state.app2Count++; document.getElementById('count-app2').innerText = state.app2Count;
+                }
+                
+                const isLimiterEnabled = document.getElementById('limiter-toggle').checked;
+
+                if (data.status === 429 && isLimiterEnabled) {
+                    handleOverloadVisuals(data.instance, false, data.ip);
+                    document.getElementById('redis-counter').innerText = data.count;
+                } else if (data.status === 503 && !isLimiterEnabled) {
+                    handleOverloadVisuals(data.instance, true, data.ip);
+                } else if (data.status === 200 && isLimiterEnabled) {
+                    const redisPacket = document.createElement('div');
+                    redisPacket.className = 'packet db';
+                    redisPacket.style.setProperty('--motion-path', paths[`${data.instance}-redis`]);
+                    arena.appendChild(redisPacket);
+                    
+                    setTimeout(() => {
+                        redisPacket.remove();
+                        document.getElementById('redis-counter').innerText = data.count;
+                    }, 200);
+                }
+            }, 400); 
+        }
+
+        initWebSocket();
+    </script>
+</body>
+</html>
