@@ -1,153 +1,53 @@
 # Distributed Rate Limiter
+### Redis-backed request limiting with a live cluster dashboard
+A Go demonstration of per-IP rate limiting across two application instances, with Redis counters and event streaming through Redis Pub/Sub and WebSockets.
 
-A production-grade distributed rate limiting system built with **Go**, **Redis**, and **WebSockets**, featuring a real-time cybersecurity "War Room" dashboard that visualizes traffic flow, attack simulation, and system resilience across a multi-node cluster.
+## What I built
+- Shared per-IP Redis counters used by both application instances.
+- HTTP 429 responses above 10 requests during a counter's one-second lifetime.
+- A live dashboard showing requests, blocks, cluster controls, and generated traffic.
+- A Docker Compose setup with two Go services and one Redis service.
+- A limiter-off mode that simulates overload using HTTP 503 responses.
 
-![System Architecture](architecture_dark.png)
+![Architecture](architecture_dark.png)
 
----
-
-## Features
-
-- **Cluster-Wide Rate Limiting** — Redis-backed atomic counters enforce a global 10 RPS threshold per IP across all instances.
-- **Hardware Failure Simulation** — Toggle the limiter off to simulate unprotected servers crashing under load (503 Service Unavailable).
-- **Real-Time War Room Dashboard** — Animated SVG-based visualization showing packet flow between Attacker → Servers → Redis with live counters, particle streams, and crash indicators.
-- **WebSocket Event Streaming** — All cluster events (traffic, control, attack, burst) are broadcast in real-time via Redis Pub/Sub → WebSocket.
-- **Built-In Attack Generator** — Configurable RPS attack simulation (1–5000 RPS) fired directly from the dashboard UI.
-- **Multi-Instance Architecture** — Docker Compose spins up 2 Go server instances + 1 Redis node to demonstrate true distributed behavior.
-- **System Event Console** — Scrollable, timestamped log panel showing every request, block, and crash event.
-
----
-
-## Architecture
-
-The system uses a hub-and-spoke architecture with Redis as the central coordination layer:
-
-![Request Flow](flowchart_dark.png)
-
-```
-┌─────────────┐       ┌─────────────┐       ┌─────────────┐
-│  Attacker    │──────▶│  App 1       │──────▶│             │
-│  (Browser)   │       │  :8081       │       │   Redis     │
-│              │──────▶│  App 2       │◀─────▶│   :6379     │
-│              │       │  :8082       │       │             │
-└─────────────┘       └─────────────┘       └─────────────┘
-       │                     ▲
-       │    WebSocket        │  Pub/Sub
-       └─────────────────────┘
-```
-
-**Key Components:**
-
-| Component | Role |
-|-----------|------|
-| `main.go` | Go HTTP server with rate limiting middleware, WebSocket hub, Redis Pub/Sub subscriber, and attack engine |
-| `static/index.html` | War Room dashboard — animated SVG arena, command center controls, system event console |
-| `docker-compose.yaml` | Orchestrates 2 app instances + 1 Redis container |
-| `Dockerfile` | Multi-stage Go build using `golang:1.22-alpine` |
-
----
-
-## Prerequisites
-
-- [Docker](https://docs.docker.com/get-docker/) & [Docker Compose](https://docs.docker.com/compose/install/)
-- (Optional) [Go 1.21+](https://go.dev/dl/) — only if running outside Docker
-
----
-
-## Installation & Setup
-
-### 1. Clone the repository
+## Run the demonstration
+Requires Docker with Compose.
 
 ```bash
-git clone https://github.com/<your-username>/distributed-limiter.git
-cd distributed-limiter
+git clone https://github.com/theprideofwolves/Rate-Limiter-Project.git
+cd Rate-Limiter-Project
+docker compose up --build
 ```
 
-### 2. Start the cluster (Docker)
+Open [instance 1](http://localhost:8081) or [instance 2](http://localhost:8082). Both use the shared Redis service.
 
-```bash
-docker-compose up --build
-```
+Use the dashboard to toggle the limiter and generate local traffic. The generator varies source IP headers, so its aggregate traffic is not a repeatable same-IP limit test. The 503 mode is a simulation; it does not crash the application process.
 
-This spins up:
-- **Redis** on `localhost:6379`
-- **App 1** on `localhost:8081`
-- **App 2** on `localhost:8082`
+## Request and event flow
+`request -> IP extraction -> Redis INCR / EXPIRE -> 200 or 429 -> Pub/Sub -> WebSocket dashboard`
 
-### 3. Open the Dashboard
+![Request flow](flowchart_dark.png)
 
-Navigate to either instance in your browser:
+| Endpoint | Role |
+| --- | --- |
+| `/` | Dashboard |
+| `/api/test` | Rate-limited demonstration endpoint |
+| `/ws` | Dashboard events and control commands |
 
-```
-http://localhost:8081
-```
+## Configuration
+| Variable | Default |
+| --- | --- |
+| `INSTANCE_NAME` | `unknown-instance` |
+| `REDIS_URL` | `localhost:6379` |
 
----
+The application listens on container port 8080; Compose maps the instances to host ports 8081 and 8082.
 
-## Usage
+## Current scope
+This is an educational prototype. Counter increment and expiry are separate Redis operations, expiry errors are not checked, and IP headers are accepted without a trusted-proxy configuration. WebSocket controls are unauthenticated and accept all origins. The dashboard reset command flushes the selected Redis database; use a dedicated demo Redis instance.
 
-### Dashboard Controls
+The repository demonstrates coordination and observability, with no production reliability or load-capacity claim.
 
-| Control | Description |
-|---------|-------------|
-| **Global Limiter Shield** (toggle) | Enables/disables the Redis-backed distributed rate limiter across all nodes. When OFF, servers run unprotected and will crash under load. |
-| **RPS Input** | Set the requests-per-second for the attack simulation (1–5000). |
-| **Start Attack** | Fires a burst of traffic at the configured RPS. The attack runs for ~1.5 seconds, then auto-stops. |
-
-### What to observe
-
-1. **Limiter ON + Attack** → Packets flow from Attacker → Servers → Redis. After 10 RPS, requests get blocked (429). The path shows a red **✖** and the system event log shows `ATTACK DEFLECTED`.
-
-2. **Limiter OFF + Attack** → Servers have no Redis protection. After 10 local requests, servers crash (503). Nodes shake, display a pulsing **✖**, and the log shows `CRITICAL FAILURE`.
-
-### Running without Docker (local development)
-
-```bash
-# Terminal 1: Start Redis
-redis-server
-
-# Terminal 2: Start App 1
-INSTANCE_NAME=app1 REDIS_URL=localhost:6379 go run main.go
-
-# Terminal 3: Start App 2 (on a different port)
-INSTANCE_NAME=app2 REDIS_URL=localhost:6379 go run main.go
-```
-
-> **Note:** When running locally, both instances share port 8080 by default. You'll need to modify the port for the second instance or use Docker Compose for the full multi-node experience.
-
----
-
-## API Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/` | GET | Serves the War Room dashboard |
-| `/api/test` | GET | Rate-limited test endpoint — returns `200`, `429`, or `503` |
-| `/ws` | GET | WebSocket connection for real-time event streaming |
-
----
-
-## Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `INSTANCE_NAME` | `unknown-instance` | Identifier for this server node |
-| `REDIS_URL` | `localhost:6379` | Redis connection address |
-
----
-
-## Tech Stack
-
-| Technology | Purpose |
-|------------|---------|
-| **Go 1.21** | HTTP server, rate limiting logic, attack engine |
-| **Redis** | Distributed counters (INCR + EXPIRE), Pub/Sub for cluster events |
-| **WebSockets** (gorilla/websocket) | Real-time dashboard event streaming |
-| **HTML/CSS/JS** | War Room dashboard with SVG animations |
-| **Docker Compose** | Multi-container orchestration |
-
----
-
-## License
-
-MIT
+## Resume bullets
+- Built a two-instance Go and Docker Compose demonstration using shared Redis counters to enforce per-IP request limits and return HTTP 429 responses above the configured threshold.
+- Streamed cluster events through Redis Pub/Sub and WebSockets to a live dashboard with generated traffic, cluster controls, and simulated overload behavior.
