@@ -22,7 +22,7 @@ docker compose up --build
 
 Open [instance 1](http://localhost:8081) or [instance 2](http://localhost:8082). Both use the shared Redis service.
 
-Use the dashboard to toggle the limiter and generate local traffic. The generator varies source IP headers, so its aggregate traffic is not a repeatable same-IP limit test. The 503 mode is a simulation; it does not crash the application process.
+Use the dashboard to toggle the limiter and generate local traffic. Use `go run ./cmd/demo` for a repeatable same-client check across both instances. Generated traffic uses each instance's socket peer identity by default. The 503 mode is a simulation; it does not crash the application process.
 
 ## Request and event flow
 `request -> IP extraction -> Redis INCR / EXPIRE -> 200 or 429 -> Pub/Sub -> WebSocket dashboard`
@@ -41,13 +41,17 @@ Use the dashboard to toggle the limiter and generate local traffic. The generato
 | `INSTANCE_NAME` | `unknown-instance` |
 | `REDIS_URL` | `localhost:6379` |
 
-The application listens on container port 8080; Compose maps the instances to host ports 8081 and 8082.
+The application listens on port 8080 by default (`PORT` overrides it); Compose maps the instances to host ports 8081 and 8082.
 
 ## Current scope
-This is an educational prototype. Counter increment and expiry are separate Redis operations, expiry errors are not checked, and IP headers are accepted without a trusted-proxy configuration. WebSocket controls are unauthenticated and accept all origins. The dashboard reset command flushes the selected Redis database; use a dedicated demo Redis instance.
+This is an educational prototype. A Redis Lua script increments and expires each counter atomically. Redis failures return HTTP 503. Forwarded headers are ignored unless `TRUST_PROXY=true`; enable that only behind a trusted proxy. WebSocket origins must match the request host. Demo controls remain unauthenticated; Compose binds host ports to loopback. Reset removes only `rate_limit:*` keys and is intended for an idle demo.
 
 The repository demonstrates coordination and observability, with no production reliability or load-capacity claim.
 
 ## Resume bullets
 - Built a two-instance Go and Docker Compose demonstration using shared Redis counters to enforce per-IP request limits and return HTTP 429 responses above the configured threshold.
 - Streamed cluster events through Redis Pub/Sub and WebSockets to a live dashboard with generated traffic, cluster controls, and simulated overload behavior.
+
+
+## Interview demonstration and verification
+See [INTERVIEW.md](INTERVIEW.md) for a walkthrough, expected results, design decisions, and limitations. Run `go test ./...`, `go vet ./...`, and `go build ./...`. GitHub Actions also runs the race detector on Linux.

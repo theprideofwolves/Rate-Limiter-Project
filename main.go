@@ -7,7 +7,9 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,15 +20,37 @@ import (
 
 var ctx = context.Background()
 
+// The increment and expiry execute atomically on Redis, so a process failure
+// cannot leave a counter without its expiration.
+var counterScript = redis.NewScript(`
+local n = redis.call('INCR', KEYS[1])
+if n == 1 or redis.call('PTTL', KEYS[1]) < 0 then
+ redis.call('PEXPIRE', KEYS[1], ARGV[1])
+end
+return n
+`)
+
+func resetRateCounters(rdb *redis.Client) {
+	iter := rdb.Scan(ctx, 0, "rate_limit:*", 100).Iterator()
+	for iter.Next(ctx) {
+		if err := rdb.Del(ctx, iter.Val()).Err(); err != nil {
+			log.Printf("reset: %v", err)
+		}
+	}
+	if err := iter.Err(); err != nil {
+		log.Printf("reset scan: %v", err)
+	}
+}
+
 var limiterEnabled int32 = 1
 var localRequestCount int32 = 0
 
 type Event struct {
-	Type     string      `json:"type"` // "traffic", "control", or "attack", or "burst"
-	Traffic  TrafficData `json:"traffic,omitempty"`
-	Control  ControlData `json:"control,omitempty"`
-	Attack   AttackData  `json:"attack,omitempty"`
-	Burst    BurstData   `json:"burst,omitempty"`
+	Type    string      `json:"type"` // "traffic", "control", or "attack", or "burst"
+	Traffic TrafficData `json:"traffic,omitempty"`
+	Control ControlData `json:"control,omitempty"`
+	Attack  AttackData  `json:"attack,omitempty"`
+	Burst   BurstData   `json:"burst,omitempty"`
 }
 
 type BurstData struct {
@@ -53,7 +77,12 @@ type AttackData struct {
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
-		return true
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			return true
+		}
+		u, err := url.Parse(origin)
+		return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host == r.Host
 	},
 }
 
@@ -93,6 +122,7 @@ func (h *Hub) run() {
 		case message := <-h.broadcast:
 			h.mu.Lock()
 			for client := range h.clients {
+				_ = client.SetWriteDeadline(time.Now().Add(5 * time.Second))
 				err := client.WriteMessage(websocket.TextMessage, message)
 				if err != nil {
 					client.Close()
@@ -105,12 +135,19 @@ func (h *Hub) run() {
 }
 
 func getIP(r *http.Request) string {
-	ip := r.Header.Get("X-Real-IP")
-	if ip == "" {
-		ip = r.Header.Get("X-Forwarded-For")
+	// Forwarded headers are honored only in an explicitly configured proxy deployment.
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		ip = r.RemoteAddr
 	}
-	if ip == "" {
-		ip, _, _ = net.SplitHostPort(r.RemoteAddr)
+	if os.Getenv("TRUST_PROXY") == "true" {
+		forwarded := r.Header.Get("X-Real-IP")
+		if forwarded == "" {
+			forwarded = strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-For"), ",")[0])
+		}
+		if net.ParseIP(forwarded) != nil {
+			ip = forwarded
+		}
 	}
 	return ip
 }
@@ -118,25 +155,24 @@ func getIP(r *http.Request) string {
 func rateLimitMiddleware(rdb *redis.Client, instanceName string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ip := getIP(r)
-		
+
 		status := 200
 		var globalCount int64 = 0
-		
+
 		isLimiterEnabled := atomic.LoadInt32(&limiterEnabled) == 1
 
 		if isLimiterEnabled {
 			// Redis Distributed Logic
 			key := fmt.Sprintf("rate_limit:%s", ip)
-			count, err := rdb.Incr(ctx, key).Result()
+			requestCtx, cancel := context.WithTimeout(r.Context(), time.Second)
+			defer cancel()
+			count, err := counterScript.Run(requestCtx, rdb, []string{key}, 1000).Int64()
 			if err != nil {
 				log.Printf("Redis error: %v", err)
-				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+				http.Error(w, "Rate limiter unavailable", http.StatusServiceUnavailable)
 				return
 			}
 
-			if count == 1 {
-				rdb.Expire(ctx, key, 1*time.Second)
-			}
 			globalCount = count
 
 			if count > 10 {
@@ -160,11 +196,12 @@ func rateLimitMiddleware(rdb *redis.Client, instanceName string, next http.Handl
 				Count:    globalCount,
 			},
 		}
-		
+
 		jsonData, _ := json.Marshal(event)
 		rdb.Publish(ctx, "cluster_events", jsonData)
 
 		if status == 429 {
+			w.Header().Set("Retry-After", "1")
 			http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
 			return
 		}
@@ -184,7 +221,7 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hub.register <- conn
-	
+
 	// Read from client to catch toggle commands
 	go func() {
 		defer func() {
@@ -195,7 +232,7 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				break
 			}
-			
+
 			var cmd struct {
 				Type    string `json:"type"`
 				Enabled bool   `json:"enabled"`
@@ -265,8 +302,8 @@ func runAttack(ctx context.Context, totalRequests int, port string) {
 			go func() {
 				req, err := http.NewRequest("GET", url, nil)
 				if err == nil {
-					// Randomize IP slightly to simulate different users
-					ip := fmt.Sprintf("10.0.%d.%d", time.Now().UnixNano()%255, time.Now().UnixNano()%255)
+					// Stable client identity makes repeated-IP limiting demonstrable.
+					ip := "192.0.2.10"
 					req.Header.Set("X-Real-IP", ip)
 					resp, err := client.Do(req)
 					if err == nil {
@@ -280,7 +317,10 @@ func runAttack(ctx context.Context, totalRequests int, port string) {
 }
 
 func main() {
-	port := "8080"
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
 	instanceName := os.Getenv("INSTANCE_NAME")
 	if instanceName == "" {
 		instanceName = "unknown-instance"
@@ -301,7 +341,7 @@ func main() {
 
 	hub := newHub(rdb)
 	go hub.run()
-	
+
 	// Hardware Limit Reset Timer (resets localRequestCount every 1 second)
 	go func() {
 		for {
@@ -314,15 +354,15 @@ func main() {
 	pubsub := rdb.Subscribe(ctx, "cluster_events")
 	go func() {
 		ch := pubsub.Channel()
-		
+
 		ticker := time.NewTicker(1 * time.Second)
 		defer ticker.Stop()
-		
+
 		type nodeStats struct {
 			count  int
 			status int
 		}
-		
+
 		trafficBatch := make(map[string]*nodeStats)
 		var trafficEvents []Event
 
@@ -353,7 +393,7 @@ func main() {
 							// Divide RPS by 2 since there are two instances to match expected total exactly.
 							targetRPS := event.Attack.RPS / 2
 							if targetRPS == 0 && event.Attack.RPS > 0 {
-							    targetRPS = 1
+								targetRPS = 1
 							}
 							go runAttack(attackCtx, targetRPS, port)
 						}
@@ -361,7 +401,7 @@ func main() {
 					} else if event.Type == "reset" {
 						hub.broadcast <- []byte(msg.Payload)
 						// Clear Redis database and local request count
-						rdb.FlushDB(ctx)
+						resetRateCounters(rdb)
 						atomic.StoreInt32(&localRequestCount, 0)
 						log.Println("Cluster commanded to RESET counters")
 					} else if event.Type == "traffic" {
@@ -380,7 +420,7 @@ func main() {
 				}
 			case <-ticker.C:
 				burstNodes := make(map[string]bool)
-				
+
 				for node, stats := range trafficBatch {
 					if stats.count > 50 {
 						burstNodes[node] = true
@@ -396,14 +436,14 @@ func main() {
 						hub.broadcast <- burstData
 					}
 				}
-				
+
 				for _, event := range trafficEvents {
 					if !burstNodes[event.Traffic.Instance] {
 						eventData, _ := json.Marshal(event)
 						hub.broadcast <- eventData
 					}
 				}
-				
+
 				trafficBatch = make(map[string]*nodeStats)
 				trafficEvents = []Event{}
 			}

@@ -6,7 +6,7 @@ WORKDIR /app
 COPY . .
 
 # Generate the missing go.sum and download dependencies
-RUN go mod tidy
+RUN go mod download
 
 # Build the application
 RUN go build -o server main.go
@@ -14,3 +14,4 @@ RUN go build -o server main.go
 EXPOSE 8080
 
 CMD ["./server"]
+
